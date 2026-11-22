@@ -1,5 +1,5 @@
 APP_NAME := antigravity-cleaner
-VERSION := 5.4.8
+VERSION := 5.4.9
 BUILD_DIR := dist
 
 .PHONY: all build clean test release
@@ -21,7 +21,7 @@ release: clean
 	@echo "Building Linux amd64..."
 	GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o $(BUILD_DIR)/$(APP_NAME)-linux-amd64 ./cmd/antigravity
 	@echo "Building Linux arm64..."
-	GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o $(BUILD_DIR)/$(APP_NAME)-linux-arm64 ./cmd/antigravity
+	GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o $(BUILD_DIR)/$(APP_NAME)-linux-arm64 ./cmd/antigravity
 	@echo "Building macOS amd64..."
 	GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o $(BUILD_DIR)/$(APP_NAME)-darwin-amd64 ./cmd/antigravity
 	@echo "Building macOS arm64 (Apple Silicon)..."

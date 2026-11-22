@@ -61,7 +61,7 @@ func FindVsCodeExtension() string {
 		// 1. Direct subfolder check for 'agy' extension in bundled builds
 		directAgy := filepath.Join(dir, "agy")
 		if fi, err := os.Stat(directAgy); err == nil && fi.IsDir() {
-			for _, sub := range []string{filepath.Join("dist", "extension.js"), "extension.js"} {
+			for _, sub := range []string{filepath.Join("vscode", "extension.js"), filepath.Join("dist", "extension.js"), "extension.js"} {
 				target := filepath.Join(directAgy, sub)
 				if fiTarget, errTarget := os.Stat(target); errTarget == nil && !fiTarget.IsDir() {
 					if fiTarget.ModTime().Unix() > latestModTime {
@@ -79,7 +79,7 @@ func FindVsCodeExtension() string {
 		}
 		for _, e := range entries {
 			if e.IsDir() && (strings.HasPrefix(e.Name(), "google.google-antigravity-") || strings.HasPrefix(e.Name(), "google.antigravity-") || strings.HasPrefix(e.Name(), "antigravity-") || strings.EqualFold(e.Name(), "agy") || strings.HasPrefix(e.Name(), "agy-")) {
-				for _, sub := range []string{"extension.js", filepath.Join("dist", "extension.js")} {
+				for _, sub := range []string{filepath.Join("vscode", "extension.js"), filepath.Join("dist", "extension.js"), "extension.js"} {
 					extJs := filepath.Join(dir, e.Name(), sub)
 					if fi, err := os.Stat(extJs); err == nil && !fi.IsDir() {
 						if fi.ModTime().Unix() > latestModTime {
@@ -148,11 +148,13 @@ func PatchVsCodeExtension(extPath string) (string, error) {
 		return "", fmt.Errorf("failed to write patched extension.js: %w", err)
 	}
 
-	// Also patch ~/.gemini/bin/antigravity if it exists
+	// Also patch ~/.gemini/bin/agy and agy.exe if it exists
 	home, _ := os.UserHomeDir()
-	downloadedBin := filepath.Join(home, ".gemini", "bin", "antigravity")
-	if fi, err := os.Stat(downloadedBin); err == nil && !fi.IsDir() {
-		_, _ = PatchAgy(downloadedBin)
+	for _, binName := range []string{"agy", "agy.exe", "antigravity", "antigravity.exe"} {
+		downloadedBin := filepath.Join(home, ".gemini", "bin", binName)
+		if fi, err := os.Stat(downloadedBin); err == nil && !fi.IsDir() {
+			_, _ = PatchAgy(downloadedBin)
+		}
 	}
 
 	return fmt.Sprintf("Successfully patched VS Code extension %s (re-download guard + channel lock)", filepath.Base(filepath.Dir(extPath))), nil

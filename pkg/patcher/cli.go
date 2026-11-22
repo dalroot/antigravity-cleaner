@@ -90,15 +90,8 @@ var (
 	}()
 )
 
-// FindAgy dynamically searches for the agy binary in PATH, user environments, and dynamic runtime locations
-func FindAgy() string {
-	names := []string{"agy", "agy.exe", "antigravity", "antigravity.exe"}
-	for _, n := range names {
-		if p, err := exec.LookPath(n); err == nil && p != "" {
-			return p
-		}
-	}
-
+// FindAllAgyBinaries dynamically searches for all agy binaries in PATH, user environments, and dynamic runtime locations
+func FindAllAgyBinaries() []string {
 	home, _ := os.UserHomeDir()
 	seen := make(map[string]bool)
 	var candidates []string
@@ -113,6 +106,13 @@ func FindAgy() string {
 			if fi, err := os.Stat(clean); err == nil && !fi.IsDir() {
 				candidates = append(candidates, clean)
 			}
+		}
+	}
+
+	names := []string{"agy", "agy.exe", "antigravity", "antigravity.exe"}
+	for _, n := range names {
+		if p, err := exec.LookPath(n); err == nil && p != "" {
+			add(p)
 		}
 	}
 
@@ -149,21 +149,20 @@ func FindAgy() string {
 		add(filepath.Join(progFiles, "agy", "agy.exe"))
 	}
 
-	if len(candidates) > 0 {
-		return candidates[0]
+	return candidates
+}
+
+// FindAgy dynamically searches for the primary agy binary
+func FindAgy() string {
+	all := FindAllAgyBinaries()
+	if len(all) > 0 {
+		return all[0]
 	}
 	return ""
 }
 
-// PatchAgy patches the agy binary to bypass the Eligibility Check screen
-func PatchAgy(binPath string) (string, error) {
-	if binPath == "" {
-		binPath = FindAgy()
-		if binPath == "" {
-			return "", fmt.Errorf("agy CLI binary not found")
-		}
-	}
-
+// PatchSingleAgy patches a specific agy binary to bypass the Eligibility Check screen
+func PatchSingleAgy(binPath string) (string, error) {
 	data, err := os.ReadFile(binPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read %s: %w", binPath, err)
@@ -223,4 +222,38 @@ func PatchAgy(binPath string) (string, error) {
 	}
 
 	return fmt.Sprintf("Successfully patched %s [%s]", filepath.Base(binPath), strings.Join(appliedNames, ", ")), nil
+}
+
+// PatchAgy patches all detected agy binaries
+func PatchAgy(binPath string) (string, error) {
+	if binPath != "" {
+		return PatchSingleAgy(binPath)
+	}
+
+	targets := FindAllAgyBinaries()
+	if len(targets) == 0 {
+		return "", fmt.Errorf("agy CLI binary not found")
+	}
+
+	var patchedCount int
+	var lastErr error
+	var results []string
+
+	for _, target := range targets {
+		res, err := PatchSingleAgy(target)
+		if err == nil {
+			patchedCount++
+			results = append(results, res)
+		} else {
+			lastErr = err
+		}
+	}
+
+	if patchedCount == 0 && lastErr != nil {
+		return "", lastErr
+	}
+	if len(results) > 0 {
+		return results[0], nil
+	}
+	return "Successfully patched agy CLI", nil
 }

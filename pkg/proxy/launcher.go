@@ -2,11 +2,13 @@ package proxy
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/dalroot/antigravity-cleaner/pkg/account"
 )
@@ -153,25 +155,60 @@ func BuildProxyEnv(proxyURL string) []string {
 	var httpProxy string
 	var socksProxy string
 
+	hostPort := CleanHostPort(proxyURL)
+	var host string
+	var port int
+	if h, pStr, err := net.SplitHostPort(hostPort); err == nil {
+		host = h
+		if p, err := net.LookupPort("tcp", pStr); err == nil {
+			port = p
+		}
+	} else {
+		host = "127.0.0.1"
+		port = 10808
+	}
+
+	// Active socket handshake verification
+	ep, probed := ProbeProxyPort(host, port, 400*time.Millisecond)
+
 	isSocks := strings.HasPrefix(proxyURL, "socks")
-	if isSocks {
+	if probed && (ep.HasHttp || ep.Type == "mixed" || ep.Type == "http") {
+		httpProxy = fmt.Sprintf("http://%s:%d", host, port)
+		if ep.HasSocks {
+			socksProxy = fmt.Sprintf("socks5h://%s:%d", host, port)
+		} else {
+			socksProxy = httpProxy
+		}
+	} else if isSocks {
 		socksProxy = proxyURL
-		// If socks5h, ensure Go and curl understand remote DNS
 		if !strings.HasPrefix(proxyURL, "socks5h://") && strings.HasPrefix(proxyURL, "socks5://") {
 			socksProxy = strings.Replace(proxyURL, "socks5://", "socks5h://", 1)
 		}
-		// Notice: Node.js (undici) throws UND_ERR_INVALID_ARG if HTTPS_PROXY contains socks5:// or socks5h://.
-		// Therefore, httpProxy remains empty when using SOCKS; Chromium uses --proxy-server directly.
 	} else {
 		httpProxy = proxyURL
 		socksProxy = proxyURL
 	}
 
+	// Preserve user existing NO_PROXY and ensure essential loopbacks are covered
+	existingNoProxy := os.Getenv("NO_PROXY")
+	if existingNoProxy == "" {
+		existingNoProxy = os.Getenv("no_proxy")
+	}
+	mergedNoProxy := "localhost,127.0.0.1,::1"
+	if existingNoProxy != "" {
+		mergedNoProxy = existingNoProxy
+		for _, loop := range []string{"localhost", "127.0.0.1", "::1"} {
+			if !strings.Contains(mergedNoProxy, loop) {
+				mergedNoProxy += "," + loop
+			}
+		}
+	}
+
 	overrides := map[string]string{
 		"ALL_PROXY":      socksProxy,
 		"all_proxy":      socksProxy,
-		"NO_PROXY":       "localhost,127.0.0.1",
-		"no_proxy":       "localhost,127.0.0.1",
+		"NO_PROXY":       mergedNoProxy,
+		"no_proxy":       mergedNoProxy,
 		"SSH_CONNECTION": "127.0.0.1 1234 127.0.0.1 22", // Remote environment spoofing: switches language_server to file-token mode
 		"SSH_CLIENT":     "127.0.0.1 1234 22",
 	}
@@ -256,7 +293,7 @@ func LaunchAntigravityWithProxy(appPath string, proxyURL string, extraArgs []str
 	// Build arguments: pass --proxy-server and loopback filter to Chromium/Electron without quotes
 	args := []string{
 		fmt.Sprintf("--proxy-server=%s", chromiumProxy),
-		"--proxy-bypass-list=<-loopback>",
+		"--proxy-bypass-list=localhost;127.0.0.1;::1",
 	}
 	args = append(args, extraArgs...)
 
@@ -334,13 +371,20 @@ if [ -L "$LOCK_FILE" ]; then
     fi
 fi
 
-# 2. Dynamic proxy port detection
-CANDIDATES=("10808" "2080" "7890" "1080" "10809" "2081")
+# 2. Dynamic proxy port detection with active protocol handshake
+CANDIDATES=("10808" "7890" "2080" "10809" "2081" "1080")
 ACTIVE_PORT=""
+IS_HTTP="0"
 
 for port in "${CANDIDATES[@]}"; do
-    if (echo > /dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then
+    if exec 3<>/dev/tcp/127.0.0.1/$port 2>/dev/null; then
         ACTIVE_PORT="$port"
+        printf "CONNECT cloudcode-pa.googleapis.com:443 HTTP/1.1\r\nHost: cloudcode-pa.googleapis.com:443\r\n\r\n" >&3
+        read -t 0.3 -u 3 resp || true
+        exec 3>&- 2>/dev/null || true
+        if [[ "$resp" == HTTP/*200* ]] || [[ "$resp" == HTTP/* ]]; then
+            IS_HTTP="1"
+        fi
         break
     fi
 done
@@ -348,32 +392,36 @@ done
 # 3. Resilient fallback: Never abort or lock out the user!
 if [ -z "$ACTIVE_PORT" ]; then
     ACTIVE_PORT="10808"
+    IS_HTTP="1"
     if command -v notify-send >/dev/null 2>&1; then
         notify-send "Antigravity" "⚠️ پروکسی فعالی شناسایی نشد؛ در حال استفاده از پورت پیش‌فرض 10808..." -i dialog-warning -t 3000 &
     fi
 fi
 
-PROXY_TYPE="socks5"
-if [ "$ACTIVE_PORT" = "10809" ] || [ "$ACTIVE_PORT" = "2081" ]; then
-    PROXY_TYPE="http"
-fi
-
-if [ "$PROXY_TYPE" = "http" ]; then
+if [ "$IS_HTTP" = "1" ]; then
     export ALL_PROXY="http://127.0.0.1:${ACTIVE_PORT}"
+    export all_proxy="http://127.0.0.1:${ACTIVE_PORT}"
     export HTTPS_PROXY="http://127.0.0.1:${ACTIVE_PORT}"
+    export https_proxy="http://127.0.0.1:${ACTIVE_PORT}"
     export HTTP_PROXY="http://127.0.0.1:${ACTIVE_PORT}"
+    export http_proxy="http://127.0.0.1:${ACTIVE_PORT}"
+    CHROMIUM_PROXY="http://127.0.0.1:${ACTIVE_PORT}"
 else
     export ALL_PROXY="socks5h://127.0.0.1:${ACTIVE_PORT}"
-    unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy
+    export all_proxy="socks5h://127.0.0.1:${ACTIVE_PORT}"
+    CHROMIUM_PROXY="socks5://127.0.0.1:${ACTIVE_PORT}"
 fi
+
+export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,::1}"
+export no_proxy="$NO_PROXY"
 
 # 4. Remote environment spoofing: switches language_server to file-token mode & reduces cloud fraud friction
 export SSH_CONNECTION="127.0.0.1 1234 127.0.0.1 22"
 export SSH_CLIENT="127.0.0.1 1234 22"
 
-# Pass socks5:// without quotes to Chromium (Chromium does not support socks5h)
+# Pass proxy without quotes to Chromium (Chromium does not support socks5h)
 # Redirect stdout/stderr to /dev/null to prevent electron-log write EIO broken-pipe popups
-exec "$APP_PATH" --proxy-server="${PROXY_TYPE}://127.0.0.1:${ACTIVE_PORT}" "$@" >/dev/null 2>&1
+exec "$APP_PATH" --proxy-server="$CHROMIUM_PROXY" --proxy-bypass-list="localhost;127.0.0.1;::1" "$@" >/dev/null 2>&1
 `, appPath)
 
 		_ = os.WriteFile(smartLauncherScript, []byte(scriptContent), 0755)
@@ -453,37 +501,48 @@ if [ ! -f "$APP_PATH" ]; then
     APP_PATH="/Applications/Antigravity.app/Contents/MacOS/Electron"
 fi
 
-CANDIDATES=("10808" "2080" "7890" "1080")
+CANDIDATES=("10808" "7890" "2080" "10809" "2081" "1080")
 ACTIVE_PORT=""
+IS_HTTP="0"
 for port in "${CANDIDATES[@]}"; do
-    if nc -z -w 1 127.0.0.1 "$port" 2>/dev/null; then
+    if exec 3<>/dev/tcp/127.0.0.1/$port 2>/dev/null; then
         ACTIVE_PORT="$port"
+        printf "CONNECT cloudcode-pa.googleapis.com:443 HTTP/1.1\r\nHost: cloudcode-pa.googleapis.com:443\r\n\r\n" >&3
+        read -t 0.3 -u 3 resp || true
+        exec 3>&- 2>/dev/null || true
+        if [[ "$resp" == HTTP/*200* ]] || [[ "$resp" == HTTP/* ]]; then
+            IS_HTTP="1"
+        fi
         break
     fi
 done
 
 if [ -z "$ACTIVE_PORT" ]; then
     ACTIVE_PORT="10808"
+    IS_HTTP="1"
 fi
 
-PROXY_TYPE="socks5"
-if [ "$ACTIVE_PORT" = "7890" ] || [ "$ACTIVE_PORT" = "10809" ] || [ "$ACTIVE_PORT" = "2081" ]; then
-    PROXY_TYPE="http"
-fi
-
-if [ "$PROXY_TYPE" = "http" ]; then
+if [ "$IS_HTTP" = "1" ]; then
     export ALL_PROXY="http://127.0.0.1:${ACTIVE_PORT}"
+    export all_proxy="http://127.0.0.1:${ACTIVE_PORT}"
     export HTTPS_PROXY="http://127.0.0.1:${ACTIVE_PORT}"
+    export https_proxy="http://127.0.0.1:${ACTIVE_PORT}"
     export HTTP_PROXY="http://127.0.0.1:${ACTIVE_PORT}"
+    export http_proxy="http://127.0.0.1:${ACTIVE_PORT}"
+    CHROMIUM_PROXY="http://127.0.0.1:${ACTIVE_PORT}"
 else
     export ALL_PROXY="socks5h://127.0.0.1:${ACTIVE_PORT}"
-    unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy
+    export all_proxy="socks5h://127.0.0.1:${ACTIVE_PORT}"
+    CHROMIUM_PROXY="socks5://127.0.0.1:${ACTIVE_PORT}"
 fi
+
+export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,::1}"
+export no_proxy="$NO_PROXY"
 
 export SSH_CONNECTION="127.0.0.1 1234 127.0.0.1 22"
 export SSH_CLIENT="127.0.0.1 1234 22"
 
-exec "$APP_PATH" --proxy-server="${PROXY_TYPE}://127.0.0.1:${ACTIVE_PORT}" "$@"
+exec "$APP_PATH" --proxy-server="$CHROMIUM_PROXY" --proxy-bypass-list="localhost;127.0.0.1;::1" "$@"
 `, appPath)
 
 		if err := os.WriteFile(cmdPath, []byte(content), 0755); err != nil {
@@ -514,15 +573,28 @@ $candidates = @(
 )
 
 $activePort = 10808
-$activeScheme = "socks5"
+$isHttp = $true
 
-foreach ($c in $candidates) {
+foreach ($p in 10808, 7890, 2080, 10809, 2081, 1080) {
     $t = New-Object System.Net.Sockets.TcpClient
     try {
-        $iar = $t.BeginConnect("127.0.0.1", $c.Port, $null, $null)
+        $iar = $t.BeginConnect("127.0.0.1", $p, $null, $null)
         if ($iar.AsyncWaitHandle.WaitOne(60, $false) -and $t.Connected) {
-            $activePort = $c.Port
-            $activeScheme = $c.Scheme
+            $stream = $t.GetStream()
+            $stream.ReadTimeout = 200
+            $stream.WriteTimeout = 200
+            $reqStr = "CONNECT cloudcode-pa.googleapis.com:443 HTTP/1.1" + [char]13 + [char]10 + "Host: cloudcode-pa.googleapis.com:443" + [char]13 + [char]10 + [char]13 + [char]10
+            $req = [System.Text.Encoding]::ASCII.GetBytes($reqStr)
+            $stream.Write($req, 0, $req.Length)
+            $buf = New-Object byte[] 64
+            $read = $stream.Read($buf, 0, 64)
+            $resp = [System.Text.Encoding]::ASCII.GetString($buf, 0, $read)
+            if ($resp -match "^HTTP/\d\.\d 200" -or $resp -match "^HTTP/") {
+                $isHttp = $true
+            } else {
+                $isHttp = $false
+            }
+            $activePort = $p
             $t.Close()
             break
         }
@@ -531,21 +603,21 @@ foreach ($c in $candidates) {
     }
 }
 
-$env:ALL_PROXY   = "$($activeScheme)://127.0.0.1:$activePort"
-$env:all_proxy   = "$($activeScheme)://127.0.0.1:$activePort"
-if ($activeScheme -eq "http") {
+if ($isHttp) {
+    $env:ALL_PROXY   = "http://127.0.0.1:$activePort"
+    $env:all_proxy   = "http://127.0.0.1:$activePort"
     $env:HTTP_PROXY  = "http://127.0.0.1:$activePort"
     $env:http_proxy  = "http://127.0.0.1:$activePort"
     $env:HTTPS_PROXY = "http://127.0.0.1:$activePort"
     $env:https_proxy = "http://127.0.0.1:$activePort"
+    $arg1 = "--proxy-server=http://127.0.0.1:$activePort"
 } else {
-    $env:HTTP_PROXY  = ""
-    $env:http_proxy  = ""
-    $env:HTTPS_PROXY = ""
-    $env:https_proxy = ""
+    $env:ALL_PROXY   = "socks5h://127.0.0.1:$activePort"
+    $env:all_proxy   = "socks5h://127.0.0.1:$activePort"
+    $arg1 = "--proxy-server=socks5://127.0.0.1:$activePort"
 }
-$env:NO_PROXY    = "localhost,127.0.0.1"
-$env:no_proxy    = "localhost,127.0.0.1"
+$env:NO_PROXY    = "localhost,127.0.0.1,::1"
+$env:no_proxy    = "localhost,127.0.0.1,::1"
 $env:SSH_CONNECTION = "127.0.0.1 1234 127.0.0.1 22"
 $env:SSH_CLIENT     = "127.0.0.1 1234 22"
 
@@ -557,8 +629,7 @@ if (-not (Test-Path $appPath)) {
     $appPath = "$env:LOCALAPPDATA\Programs\antigravity\Antigravity.exe"
 }
 
-$arg1 = "--proxy-server=$($activeScheme)://127.0.0.1:$activePort"
-$arg2 = '--proxy-bypass-list=<-loopback>'
+$arg2 = '--proxy-bypass-list=localhost;127.0.0.1;::1'
 
 Start-Process -FilePath $appPath -ArgumentList @($arg1, $arg2) -WorkingDirectory (Split-Path $appPath)
 `, appPath, appPath)
@@ -580,18 +651,18 @@ shell.Run cmd, 0, False
 		batContent := fmt.Sprintf(`@echo off
 title Antigravity - No TUN Proxy
 
-set "ALL_PROXY=socks5://127.0.0.1:10808"
-set "all_proxy=socks5://127.0.0.1:10808"
-set "HTTP_PROXY="
-set "http_proxy="
-set "HTTPS_PROXY="
-set "https_proxy="
-set "NO_PROXY=localhost,127.0.0.1"
-set "no_proxy=localhost,127.0.0.1"
+set "ALL_PROXY=http://127.0.0.1:10808"
+set "all_proxy=http://127.0.0.1:10808"
+set "HTTP_PROXY=http://127.0.0.1:10808"
+set "http_proxy=http://127.0.0.1:10808"
+set "HTTPS_PROXY=http://127.0.0.1:10808"
+set "https_proxy=http://127.0.0.1:10808"
+set "NO_PROXY=localhost,127.0.0.1,::1"
+set "no_proxy=localhost,127.0.0.1,::1"
 set "SSH_CONNECTION=127.0.0.1 1234 127.0.0.1 22"
 set "SSH_CLIENT=127.0.0.1 1234 22"
 
-start "" "%s" --proxy-server="socks5://127.0.0.1:10808" --proxy-bypass-list="<-loopback>"
+start "" "%s" --proxy-server="http://127.0.0.1:10808" --proxy-bypass-list="localhost;127.0.0.1;::1"
 `, appPath)
 		_ = os.WriteFile(batPath, []byte(batContent), 0755)
 

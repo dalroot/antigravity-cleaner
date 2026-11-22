@@ -23,7 +23,7 @@ import (
 	"github.com/dalroot/antigravity-cleaner/pkg/updater"
 )
 
-const Version = "5.4.8"
+const Version = "5.4.9"
 
 func init() {
 	patcher.RegisterPostInstallHook(func(logger patcher.LogFunc) {
