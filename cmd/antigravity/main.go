@@ -23,7 +23,7 @@ import (
 	"github.com/dalroot/antigravity-cleaner/pkg/updater"
 )
 
-const Version = "5.4.9"
+const Version = "5.4.10"
 
 func init() {
 	patcher.RegisterPostInstallHook(func(logger patcher.LogFunc) {
@@ -488,11 +488,11 @@ func runQuickAutoFix() {
 	}
 
 	fmt.Println()
-	fmt.Println(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF79C6")).Render("  Step 4: Surgical Quota, DIPS & Network Cache Reset..."))
-	if removed, err := cleaner.SurgicalReset429("", false); err != nil {
+	fmt.Println(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF79C6")).Render("  Step 4: Surgical DIPS & Network Cache Reset (Session Preserved)..."))
+	if removed, err := cleaner.SurgicalResetCacheOnly("", false); err != nil {
 		ui.PrintStatus("INFO", "Surgical Clean", "Skipped or no stale cache detected")
 	} else {
-		ui.PrintStatus("OK", "Surgical Clean", fmt.Sprintf("Cleaned %d temporary cache & session artifacts", len(removed)))
+		ui.PrintStatus("OK", "Surgical Clean", fmt.Sprintf("Cleaned %d temporary cache artifacts (login session preserved)", len(removed)))
 	}
 
 	if coreSuccess {

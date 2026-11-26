@@ -77,10 +77,20 @@ func AntigravityConfigPaths() []string {
 	return candidates
 }
 
-// SurgicalReset429 clears ONLY corrupted token, quota and auth state files,
+// SurgicalReset429 clears corrupted token, quota and auth state files,
 // including modern Chromium Network/ directories and tainted OAuth tokens in state.vscdb,
 // strictly preserving all user chat histories, settings, and workspace data.
 func SurgicalReset429(configDir string, dryRun bool) ([]string, error) {
+	return surgicalResetInternal(configDir, dryRun, true)
+}
+
+// SurgicalResetCacheOnly clears only GPU, DIPS, and network cache artifacts while strictly
+// preserving active login sessions (Cookies, Local State, app_storage.json, Session Storage, OAuth tokens).
+func SurgicalResetCacheOnly(configDir string, dryRun bool) ([]string, error) {
+	return surgicalResetInternal(configDir, dryRun, false)
+}
+
+func surgicalResetInternal(configDir string, dryRun bool, includeAuth bool) ([]string, error) {
 	var targetDirsToClean []string
 	if configDir != "" {
 		targetDirsToClean = append(targetDirsToClean, configDir)
@@ -92,11 +102,7 @@ func SurgicalReset429(configDir string, dryRun bool) ([]string, error) {
 		return nil, fmt.Errorf("no Antigravity configuration directory found")
 	}
 
-	// Targeted list of files responsible for 429 Quota & corrupt tokens
-	// Includes both root files and modern Chromium Network/ subfolder paths.
 	targetFiles := []string{
-		"Cookies",
-		"Cookies-journal",
 		"DIPS",
 		"DIPS-wal",
 		"TransportSecurity",
@@ -105,15 +111,21 @@ func SurgicalReset429(configDir string, dryRun bool) ([]string, error) {
 		"SharedStorage",
 		"SharedStorage-wal",
 		"Network Persistent State",
-		"Local State",
-		"app_storage.json",
-		filepath.Join("Network", "Cookies"),
-		filepath.Join("Network", "Cookies-journal"),
 		filepath.Join("Network", "Network Persistent State"),
 		filepath.Join("Network", "NetworkDataMigrated"),
 		filepath.Join("Network", "Trust Tokens"),
 		filepath.Join("Network", "Trust Tokens-journal"),
 		filepath.Join("Network", "TransportSecurity"),
+	}
+	if includeAuth {
+		targetFiles = append(targetFiles,
+			"Cookies",
+			"Cookies-journal",
+			"Local State",
+			"app_storage.json",
+			filepath.Join("Network", "Cookies"),
+			filepath.Join("Network", "Cookies-journal"),
+		)
 	}
 
 	targetDirs := []string{
@@ -121,9 +133,10 @@ func SurgicalReset429(configDir string, dryRun bool) ([]string, error) {
 		"DawnGraphiteCache",
 		"DawnWebGPUCache",
 		"GPUCache",
-		"Session Storage",
 		"WebStorage",
-		"Partitions",
+	}
+	if includeAuth {
+		targetDirs = append(targetDirs, "Session Storage", "Partitions")
 	}
 
 	var totalRemoved []string
@@ -160,21 +173,23 @@ func SurgicalReset429(configDir string, dryRun bool) ([]string, error) {
 			}
 		}
 
-		// 3. Reset tainted OAuth tokens in state.vscdb while preserving 100% of chats and workspaces
-		stateDbPath := filepath.Join(cDir, "User", "globalStorage", "state.vscdb")
-		if _, err := os.Stat(stateDbPath); err == nil {
-			if dryRun {
-				display := filepath.Base(cDir) + "/User/globalStorage/state.vscdb (uss-oauth)"
-				if !seenRemoved[display] {
-					seenRemoved[display] = true
-					totalRemoved = append(totalRemoved, display)
-				}
-			} else {
-				if resetTaintedTokensInStateDb(stateDbPath) {
+		// 3. Reset tainted OAuth tokens in state.vscdb only when includeAuth is enabled
+		if includeAuth {
+			stateDbPath := filepath.Join(cDir, "User", "globalStorage", "state.vscdb")
+			if _, err := os.Stat(stateDbPath); err == nil {
+				if dryRun {
 					display := filepath.Base(cDir) + "/User/globalStorage/state.vscdb (uss-oauth)"
 					if !seenRemoved[display] {
 						seenRemoved[display] = true
 						totalRemoved = append(totalRemoved, display)
+					}
+				} else {
+					if resetTaintedTokensInStateDb(stateDbPath) {
+						display := filepath.Base(cDir) + "/User/globalStorage/state.vscdb (uss-oauth)"
+						if !seenRemoved[display] {
+							seenRemoved[display] = true
+							totalRemoved = append(totalRemoved, display)
+						}
 					}
 				}
 			}

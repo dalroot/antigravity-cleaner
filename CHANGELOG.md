@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.4.10] - 2026-11-26
+
+### 🔐 Session Persistence Fix, Full Windows Shortcut Patching & Zero-Hardcode Dynamic Proxy
+
+#### 🪟 Unified Windows Shortcut Patching (Desktop, Start Menu & Taskbar)
+- **Recursive Shortcut Discovery (`pkg/proxy/launcher.go`):** `CreateDesktopLauncher` now recursively scans `Desktop`, `CommonDesktopDirectory`, `StartMenu`, `CommonStartMenu`, `Quick Launch\User Pinned\TaskBar`, and `Quick Launch\User Pinned\StartMenu` to re-target all Antigravity `.lnk` shortcuts through `run.vbs`.
+- **Prevent Unproxied Session Drops:** Eliminates accidental direct launches from pinned Taskbar or Start Menu shortcuts that previously caused 403/timeout failures and invalidated OAuth login sessions.
+
+#### 🔑 Cross-Platform Auth Persistence (Windows / Linux / macOS)
+- **Remove `SSH_CONNECTION` / `SSH_CLIENT` from Electron Launchers (`pkg/proxy/launcher.go`):** Stopped injecting SSH spoofing variables into Electron GUI environments (`BuildProxyEnv`, `launcher.ps1`, `launch.sh`, `Antigravity-Proxy.command`) so the IDE consistently uses native OS credential storage (`Windows Credential Manager` / `Keyring` / `Keychain`) without token mode mismatches.
+- **Session-Safe Auto-Fix (`pkg/cleaner/quota.go`, `cmd/antigravity/main.go`):** Added `SurgicalResetCacheOnly` and switched `[1] Auto-Fix` to preserve `Cookies`, `Local State`, `app_storage.json`, `Session Storage`, and `state.vscdb` OAuth tokens while clearing temporary GPU/DIPS caches. Explicit `429` resets (`[3] Clean`) continue to use `SurgicalReset429`.
+
+#### ⚡ Zero-Hardcode Proxy Detection & Installer Hardening
+- **Dynamic Proxy Priority (`launcher.ps1` & `launcher.bat`):** Removed hardcoded port `10808` from `launcher.bat` (now delegates to `launcher.ps1`). `launcher.ps1` resolves active proxies dynamically via environment variables, Windows System Proxy Registry (`HKCU\...\Internet Settings`), and loopback probing with a `600ms` timeout.
+- **Windows Installer (`install.ps1`):** Stripped UTF-8 BOM (fixes PowerShell 5.1 line-1 parse error on `irm ... | iex`), enabled TLS 1.2, added automatic Windows System Proxy detection for downloads, and ensured clean `User PATH` registration without duplicate `;;` separators.
+
+---
+
 ## [5.4.8] - 2026-11-15
 
 ### 🪟 Windows Silent Shortcut Overhaul, Dynamic Loopback Port Scanner & Chromium Loopback Unblock

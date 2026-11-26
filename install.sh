@@ -4,7 +4,7 @@ set -e
 APP_NAME="antigravity-cleaner"
 INSTALL_DIR="${HOME}/.local/bin"
 REPO="dalroot/antigravity-cleaner"
-VERSION="v5.4.9"
+VERSION="v5.4.10"
 
 echo "===================================================="
 echo "  ⚡ Antigravity Cleaner — Universal AI Freedom Toolkit (${VERSION})"

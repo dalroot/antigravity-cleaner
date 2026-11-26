@@ -205,12 +205,10 @@ func BuildProxyEnv(proxyURL string) []string {
 	}
 
 	overrides := map[string]string{
-		"ALL_PROXY":      socksProxy,
-		"all_proxy":      socksProxy,
-		"NO_PROXY":       mergedNoProxy,
-		"no_proxy":       mergedNoProxy,
-		"SSH_CONNECTION": "127.0.0.1 1234 127.0.0.1 22", // Remote environment spoofing: switches language_server to file-token mode
-		"SSH_CLIENT":     "127.0.0.1 1234 22",
+		"ALL_PROXY": socksProxy,
+		"all_proxy": socksProxy,
+		"NO_PROXY":  mergedNoProxy,
+		"no_proxy":  mergedNoProxy,
 	}
 
 	if httpProxy != "" {
@@ -415,10 +413,6 @@ fi
 export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,::1}"
 export no_proxy="$NO_PROXY"
 
-# 4. Remote environment spoofing: switches language_server to file-token mode & reduces cloud fraud friction
-export SSH_CONNECTION="127.0.0.1 1234 127.0.0.1 22"
-export SSH_CLIENT="127.0.0.1 1234 22"
-
 # Pass proxy without quotes to Chromium (Chromium does not support socks5h)
 # Redirect stdout/stderr to /dev/null to prevent electron-log write EIO broken-pipe popups
 exec "$APP_PATH" --proxy-server="$CHROMIUM_PROXY" --proxy-bypass-list="localhost;127.0.0.1;::1" "$@" >/dev/null 2>&1
@@ -539,9 +533,6 @@ fi
 export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,::1}"
 export no_proxy="$NO_PROXY"
 
-export SSH_CONNECTION="127.0.0.1 1234 127.0.0.1 22"
-export SSH_CLIENT="127.0.0.1 1234 22"
-
 exec "$APP_PATH" --proxy-server="$CHROMIUM_PROXY" --proxy-bypass-list="localhost;127.0.0.1;::1" "$@"
 `, appPath)
 
@@ -559,67 +550,97 @@ exec "$APP_PATH" --proxy-server="$CHROMIUM_PROXY" --proxy-bypass-list="localhost
 		vbsPath := filepath.Join(cleanerAppDir, "run.vbs")
 		batPath := filepath.Join(cleanerAppDir, "launcher.bat")
 
-		// 1. Dynamic silent PowerShell launcher with auto-port detection and full env injection
+		// 1. Dynamic silent PowerShell launcher with registry/env/port auto-detection (no hardcoded port or SSH spoofing)
 		launcherPs1Content := fmt.Sprintf(`param([string]$TargetAppPath = "%s")
 $ErrorActionPreference = 'SilentlyContinue'
 
-$candidates = @(
-    @{ Port = 10808; Scheme = "socks5" },
-    @{ Port = 2080;  Scheme = "socks5" },
-    @{ Port = 7890;  Scheme = "http" },
-    @{ Port = 1080;  Scheme = "socks5" },
-    @{ Port = 10809; Scheme = "http" },
-    @{ Port = 2081;  Scheme = "http" }
-)
-
-$activePort = 10808
+$activeProxy = $null
 $isHttp = $true
 
-foreach ($p in 10808, 7890, 2080, 10809, 2081, 1080) {
+function Test-ProxyConnect([string]$hostName, [int]$port) {
     $t = New-Object System.Net.Sockets.TcpClient
     try {
-        $iar = $t.BeginConnect("127.0.0.1", $p, $null, $null)
-        if ($iar.AsyncWaitHandle.WaitOne(60, $false) -and $t.Connected) {
+        $iar = $t.BeginConnect($hostName, $port, $null, $null)
+        if ($iar.AsyncWaitHandle.WaitOne(120, $false) -and $t.Connected) {
             $stream = $t.GetStream()
-            $stream.ReadTimeout = 200
-            $stream.WriteTimeout = 200
+            $stream.ReadTimeout = 600
+            $stream.WriteTimeout = 300
             $reqStr = "CONNECT cloudcode-pa.googleapis.com:443 HTTP/1.1" + [char]13 + [char]10 + "Host: cloudcode-pa.googleapis.com:443" + [char]13 + [char]10 + [char]13 + [char]10
             $req = [System.Text.Encoding]::ASCII.GetBytes($reqStr)
             $stream.Write($req, 0, $req.Length)
             $buf = New-Object byte[] 64
             $read = $stream.Read($buf, 0, 64)
             $resp = [System.Text.Encoding]::ASCII.GetString($buf, 0, $read)
-            if ($resp -match "^HTTP/\d\.\d 200" -or $resp -match "^HTTP/") {
-                $isHttp = $true
-            } else {
-                $isHttp = $false
-            }
-            $activePort = $p
-            $t.Close()
-            break
+            $httpMode = ($resp -match "^HTTP/\d\.\d 200" -or $resp -match "^HTTP/")
+            return @{ Ok = $true; IsHttp = $httpMode }
         }
     } catch {} finally {
         $t.Close()
     }
+    return @{ Ok = $false; IsHttp = $true }
 }
 
-if ($isHttp) {
-    $env:ALL_PROXY   = "http://127.0.0.1:$activePort"
-    $env:all_proxy   = "http://127.0.0.1:$activePort"
-    $env:HTTP_PROXY  = "http://127.0.0.1:$activePort"
-    $env:http_proxy  = "http://127.0.0.1:$activePort"
-    $env:HTTPS_PROXY = "http://127.0.0.1:$activePort"
-    $env:https_proxy = "http://127.0.0.1:$activePort"
-    $arg1 = "--proxy-server=http://127.0.0.1:$activePort"
-} else {
-    $env:ALL_PROXY   = "socks5h://127.0.0.1:$activePort"
-    $env:all_proxy   = "socks5h://127.0.0.1:$activePort"
-    $arg1 = "--proxy-server=socks5://127.0.0.1:$activePort"
+# Priority 1: Explicit environment proxy variables
+foreach ($envVal in @($env:HTTPS_PROXY, $env:HTTP_PROXY, $env:ALL_PROXY)) {
+    if ($envVal -and $envVal -match '^(?:(https?|socks5h?)://)?([^:/]+):(\d+)') {
+        $scheme = $Matches[1]
+        $h = $Matches[2]; $p = [int]$Matches[3]
+        $res = Test-ProxyConnect $h $p
+        if ($res.Ok) {
+            $activeProxy = "${h}:${p}"
+            $isHttp = if ($scheme -like 'socks*') { $false } else { $res.IsHttp }
+            break
+        }
+    }
 }
-$env:NO_PROXY    = "localhost,127.0.0.1,::1"
-$env:no_proxy    = "localhost,127.0.0.1,::1"
-$env:SSH_CONNECTION = "127.0.0.1 1234 127.0.0.1 22"
-$env:SSH_CLIENT     = "127.0.0.1 1234 22"
+
+# Priority 2: Windows System Proxy from Registry
+if (-not $activeProxy) {
+    $inet = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction SilentlyContinue
+    if ($inet -and $inet.ProxyEnable -eq 1 -and $inet.ProxyServer) {
+        $srv = $inet.ProxyServer -replace '^https?://',''
+        if ($srv -match '([^:;=\s]+):(\d+)') {
+            $h = $Matches[1]; $p = [int]$Matches[2]
+            $res = Test-ProxyConnect $h $p
+            if ($res.Ok) {
+                $activeProxy = "${h}:${p}"
+                $isHttp = $res.IsHttp
+            }
+        }
+    }
+}
+
+# Priority 3: Scan active local loopback proxy ports
+if (-not $activeProxy) {
+    foreach ($p in 10808, 7890, 2080, 10809, 2081, 1080) {
+        $res = Test-ProxyConnect "127.0.0.1" $p
+        if ($res.Ok) {
+            $activeProxy = "127.0.0.1:${p}"
+            $isHttp = $res.IsHttp
+            break
+        }
+    }
+}
+
+$argList = @()
+if ($activeProxy) {
+    if ($isHttp) {
+        $env:ALL_PROXY   = "http://$activeProxy"
+        $env:all_proxy   = "http://$activeProxy"
+        $env:HTTP_PROXY  = "http://$activeProxy"
+        $env:http_proxy  = "http://$activeProxy"
+        $env:HTTPS_PROXY = "http://$activeProxy"
+        $env:https_proxy = "http://$activeProxy"
+        $argList += "--proxy-server=http://$activeProxy"
+    } else {
+        $env:ALL_PROXY   = "socks5h://$activeProxy"
+        $env:all_proxy   = "socks5h://$activeProxy"
+        $argList += "--proxy-server=socks5://$activeProxy"
+    }
+    $env:NO_PROXY = "localhost,127.0.0.1,::1"
+    $env:no_proxy = "localhost,127.0.0.1,::1"
+    $argList += '--proxy-bypass-list=localhost;127.0.0.1;::1'
+}
 
 $appPath = $TargetAppPath
 if (-not $appPath -or -not (Test-Path $appPath)) {
@@ -629,9 +650,11 @@ if (-not (Test-Path $appPath)) {
     $appPath = "$env:LOCALAPPDATA\Programs\antigravity\Antigravity.exe"
 }
 
-$arg2 = '--proxy-bypass-list=localhost;127.0.0.1;::1'
-
-Start-Process -FilePath $appPath -ArgumentList @($arg1, $arg2) -WorkingDirectory (Split-Path $appPath)
+if ($argList.Count -gt 0) {
+    Start-Process -FilePath $appPath -ArgumentList $argList -WorkingDirectory (Split-Path $appPath)
+} else {
+    Start-Process -FilePath $appPath -WorkingDirectory (Split-Path $appPath)
+}
 `, appPath, appPath)
 		_ = os.WriteFile(ps1Path, []byte(launcherPs1Content), 0755)
 
@@ -647,26 +670,14 @@ shell.Run cmd, 0, False
 `, ps1Path)
 		_ = os.WriteFile(vbsPath, []byte(vbsContent), 0755)
 
-		// 3. Resilient Standalone Batch Launcher on Desktop
+		// 3. Resilient Standalone Batch Launcher (delegates dynamically to launcher.ps1; zero hardcoded ports)
 		batContent := fmt.Sprintf(`@echo off
-title Antigravity - No TUN Proxy
-
-set "ALL_PROXY=http://127.0.0.1:10808"
-set "all_proxy=http://127.0.0.1:10808"
-set "HTTP_PROXY=http://127.0.0.1:10808"
-set "http_proxy=http://127.0.0.1:10808"
-set "HTTPS_PROXY=http://127.0.0.1:10808"
-set "https_proxy=http://127.0.0.1:10808"
-set "NO_PROXY=localhost,127.0.0.1,::1"
-set "no_proxy=localhost,127.0.0.1,::1"
-set "SSH_CONNECTION=127.0.0.1 1234 127.0.0.1 22"
-set "SSH_CLIENT=127.0.0.1 1234 22"
-
-start "" "%s" --proxy-server="http://127.0.0.1:10808" --proxy-bypass-list="localhost;127.0.0.1;::1"
+title Antigravity - Smart Proxy Launcher
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%%~dp0launcher.ps1" -TargetAppPath "%s"
 `, appPath)
 		_ = os.WriteFile(batPath, []byte(batContent), 0755)
 
-		// 4. Generate native Windows shortcuts (.lnk) for all installed targets
+		// 4. Generate & patch all Windows shortcuts (.lnk) across Desktop, Start Menu, and Taskbar Pinned
 		targets := FindAllAntigravityExecutables()
 		if len(targets) == 0 {
 			targets = []AppTarget{{Name: "Antigravity", ExePath: appPath}}
@@ -675,38 +686,59 @@ start "" "%s" --proxy-server="http://127.0.0.1:10808" --proxy-bypass-list="local
 		for _, t := range targets {
 			lnkPath := filepath.Join(home, "Desktop", fmt.Sprintf("%s.lnk", t.Name))
 			lnkScript := fmt.Sprintf(`
-$WshShell = New-Object -comObject WScript.Shell
-$Shortcut = $WshShell.CreateShortcut("%s")
-$Shortcut.TargetPath = "wscript.exe"
-$Shortcut.Arguments = """%s"" ""%s"""
-$Shortcut.WorkingDirectory = "%s"
-$Shortcut.IconLocation = "%s,0"
-$Shortcut.Description = "Google %s with Smart Proxy"
-$Shortcut.Save()
-`, lnkPath, vbsPath, t.ExePath, filepath.Dir(t.ExePath), t.ExePath, t.Name)
-			_ = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", lnkScript).Run()
+$WshShell = New-Object -ComObject WScript.Shell
+$vbsPath = "%s"
+$exePath = "%s"
+$workDir = "%s"
+$appName = "%s"
 
-			// Also patch Start Menu shortcut if exists
-			startMenuLnk := filepath.Join(home, "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", fmt.Sprintf("%s.lnk", t.Name))
-			if _, err := os.Stat(startMenuLnk); err == nil {
-				startMenuScript := fmt.Sprintf(`
-$WshShell = New-Object -comObject WScript.Shell
-$Shortcut = $WshShell.CreateShortcut("%s")
-$Shortcut.TargetPath = "wscript.exe"
-$Shortcut.Arguments = """%s"" ""%s"""
-$Shortcut.WorkingDirectory = "%s"
-$Shortcut.IconLocation = "%s,0"
-$Shortcut.Description = "Google %s with Smart Proxy"
-$Shortcut.Save()
-`, startMenuLnk, vbsPath, t.ExePath, filepath.Dir(t.ExePath), t.ExePath, t.Name)
-				_ = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", startMenuScript).Run()
-			}
+function Set-SmartShortcut([string]$path) {
+    try {
+        $s = $WshShell.CreateShortcut($path)
+        $s.TargetPath = "wscript.exe"
+        $s.Arguments = """$vbsPath"" ""$exePath"""
+        $s.WorkingDirectory = $workDir
+        $s.IconLocation = "$exePath,0"
+        $s.Description = "Google $appName with Smart Proxy"
+        $s.Save()
+    } catch {}
+}
+
+# Ensure primary Desktop shortcut
+Set-SmartShortcut "%s"
+
+# Recursively patch all existing shortcuts across Desktop, Start Menu, and Taskbar Pinned
+$roots = @(
+    [Environment]::GetFolderPath("Desktop"),
+    [Environment]::GetFolderPath("CommonDesktopDirectory"),
+    [Environment]::GetFolderPath("StartMenu"),
+    [Environment]::GetFolderPath("CommonStartMenu"),
+    (Join-Path $env:APPDATA "Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"),
+    (Join-Path $env:APPDATA "Microsoft\Internet Explorer\Quick Launch\User Pinned\StartMenu")
+) | Where-Object { $_ -and (Test-Path $_) }
+
+foreach ($root in $roots) {
+    Get-ChildItem -Path $root -Recurse -Filter "*.lnk" -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($_.Name -like "*Cleaner*") { return }
+        try {
+            $sc = $WshShell.CreateShortcut($_.FullName)
+            $tLower = if ($sc.TargetPath) { $sc.TargetPath.ToLowerInvariant() } else { "" }
+            $aLower = if ($sc.Arguments) { $sc.Arguments.ToLowerInvariant() } else { "" }
+            $eLower = $exePath.ToLowerInvariant()
+            if ($tLower -eq $eLower -or ($tLower -like "*wscript.exe" -and $aLower -like "*$eLower*")) {
+                Set-SmartShortcut $_.FullName
+            }
+        } catch {}
+    }
+}
+`, vbsPath, t.ExePath, filepath.Dir(t.ExePath), t.Name, lnkPath)
+			_ = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", lnkScript).Run()
 		}
 
 		if len(targets) > 1 {
-			return "Official Desktop & Start Menu shortcuts updated for Antigravity & Antigravity IDE", nil
+			return "Official Desktop, Start Menu & Taskbar shortcuts updated for Antigravity & Antigravity IDE", nil
 		}
-		return "Official Desktop & Start Menu shortcuts successfully patched with Smart No-TUN Proxy", nil
+		return "Official Desktop, Start Menu & Taskbar shortcuts successfully patched with Smart No-TUN Proxy", nil
 	}
 
 	return "", fmt.Errorf("desktop launcher generation not supported on %s", runtime.GOOS)
